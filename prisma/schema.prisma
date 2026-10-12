@@ -1,0 +1,230 @@
+// Daily Habit Tracker data model.
+//
+// Calendar dates (startDate, completionDate, ...) are @db.Date values that hold the
+// user's *local* calendar day (resolved with User.timeZone), never a UTC instant.
+// Completion progress and streaks are derived from HabitCompletion rows, not stored.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ThemePreference {
+  SYSTEM
+  LIGHT
+  DARK
+}
+
+enum HabitCategory {
+  HEALTH
+  FITNESS
+  LEARNING
+  PRODUCTIVITY
+  MINDFULNESS
+  PERSONAL_DEVELOPMENT
+  FINANCE
+  CUSTOM
+}
+
+enum ScheduleType {
+  DAILY
+  SELECTED_DAYS
+  WEEKLY
+}
+
+enum GoalMetric {
+  COMPLETIONS
+  STREAK
+  QUANTITY
+}
+
+enum GoalStatus {
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+enum NotificationType {
+  REMINDER
+  MILESTONE
+  STREAK
+  SYSTEM
+}
+
+model User {
+  id                   String          @id @default(cuid())
+  name                 String          @db.VarChar(80)
+  email                String          @unique @db.VarChar(254)
+  passwordHash         String
+  timeZone             String          @default("UTC") @db.VarChar(64)
+  preferredTheme       ThemePreference @default(SYSTEM)
+  /// 0 = Sunday, 1 = Monday, ... 6 = Saturday
+  weekStartsOn         Int             @default(1) @db.SmallInt
+  remindersEnabled     Boolean         @default(true)
+  milestoneAlerts      Boolean         @default(true)
+  browserNotifications Boolean         @default(false)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  habits              Habit[]
+  goals               Goal[]
+  notifications       Notification[]
+  sessions            Session[]
+  passwordResetTokens PasswordResetToken[]
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  /// SHA-256 of the opaque cookie token; the raw token is never stored.
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  userAgent  String?  @db.VarChar(300)
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  /// SHA-256 of the emailed token; the raw token is never stored.
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Habit {
+  id             String        @id @default(cuid())
+  userId         String
+  name           String        @db.VarChar(100)
+  description    String?       @db.VarChar(500)
+  category       HabitCategory @default(PERSONAL_DEVELOPMENT)
+  /// Label used when category = CUSTOM.
+  customCategory String?       @db.VarChar(40)
+  icon           String        @default("target") @db.VarChar(40)
+  color          String        @default("#6366f1") @db.VarChar(9)
+  scheduleType   ScheduleType  @default(DAILY)
+  /// Weekday numbers (0 = Sunday ... 6 = Saturday) for SELECTED_DAYS schedules.
+  scheduledDays  Int[]
+  /// Completions required per week for WEEKLY schedules.
+  weeklyTarget   Int?          @db.SmallInt
+  /// Optional measurable daily target (e.g. 20 minutes, 8 glasses).
+  targetValue    Float?
+  targetUnit     String?       @db.VarChar(30)
+  /// Local time of day as "HH:mm" in the user's time zone.
+  reminderTime   String?       @db.VarChar(5)
+  startDate      DateTime      @db.Date
+  archivedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  completions HabitCompletion[]
+  pauses      HabitPause[]
+  goals       Goal[]
+
+  @@index([userId, archivedAt])
+  @@index([userId, category])
+  @@index([userId, createdAt])
+}
+
+/// A period during which a habit was archived. Paused days are neither scheduled nor missed,
+/// so archiving and later reactivating a habit does not damage its history or streaks.
+/// `endDate` is exclusive and null while the habit is still archived.
+model HabitPause {
+  id        String    @id @default(cuid())
+  habitId   String
+  startDate DateTime  @db.Date
+  endDate   DateTime? @db.Date
+  createdAt DateTime  @default(now())
+
+  habit Habit @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  @@index([habitId])
+}
+
+model HabitCompletion {
+  id             String    @id @default(cuid())
+  habitId        String
+  /// The user's local calendar day this entry belongs to.
+  completionDate DateTime  @db.Date
+  /// Set when the habit counts as done for the day (null = progress recorded but target not met).
+  completedAt    DateTime?
+  progressValue  Float?
+  notes          String?   @db.VarChar(1000)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  habit Habit @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  @@unique([habitId, completionDate])
+  @@index([completionDate])
+}
+
+model Goal {
+  id          String     @id @default(cuid())
+  userId      String
+  /// Required for STREAK and QUANTITY goals; null on a COMPLETIONS goal means "all habits".
+  habitId     String?
+  title       String     @db.VarChar(120)
+  description String?    @db.VarChar(500)
+  metric      GoalMetric @default(COMPLETIONS)
+  targetValue Float
+  startDate   DateTime   @db.Date
+  targetDate  DateTime?  @db.Date
+  status      GoalStatus @default(ACTIVE)
+  completedAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  habit Habit? @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([habitId])
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String
+  title       String           @db.VarChar(140)
+  message     String           @db.VarChar(500)
+  type        NotificationType @default(SYSTEM)
+  /// Optional in-app link opened from the notification.
+  href        String?          @db.VarChar(200)
+  /// Makes generation idempotent (e.g. "reminder:<habitId>:2026-01-31").
+  dedupeKey   String?          @db.VarChar(120)
+  readAt      DateTime?
+  dismissedAt DateTime?
+  createdAt   DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}
+
+/// Fixed-window rate-limit counters, shared by every server instance.
+model RateLimit {
+  key     String   @id @db.VarChar(200)
+  count   Int      @default(0)
+  resetAt DateTime
+
+  @@index([resetAt])
+}
